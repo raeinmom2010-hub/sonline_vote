@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>관리자 - 캐릭터 공모전 투표</title>
+  <link rel="stylesheet" href="css/admin.css">
+</head>
+<body>
+
+  <!-- ═══════════════ 로그인 / 계정 만들기 ═══════════════ -->
+  <section id="authView" class="auth">
+    <div class="auth-card">
+      <h1 class="auth-title">교사용 관리 페이지</h1>
+
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" type="button" data-authtab="login">로그인</button>
+        <button class="tab" type="button" data-authtab="signup">관리자 계정 만들기</button>
+      </div>
+
+      <!-- 로그인 -->
+      <form id="loginForm" class="auth-form" novalidate>
+        <label class="field"><span>이메일</span><input id="loginEmail" type="email" autocomplete="username" required></label>
+        <label class="field"><span>비밀번호</span><input id="loginPassword" type="password" autocomplete="current-password" required></label>
+        <p id="loginError" class="form-error hidden"></p>
+        <button id="loginSubmit" class="btn btn-primary btn-block" type="submit">로그인</button>
+      </form>
+
+      <!-- 계정 만들기: 이메일 + 비밀번호 + 가입 코드 → 생성·활성화·관리자 등록 한 번에 -->
+      <form id="signupForm" class="auth-form hidden" novalidate>
+        <label class="field"><span>이메일</span><input id="signupEmail" type="email" autocomplete="username" required></label>
+        <label class="field"><span>비밀번호 (6자 이상)</span><input id="signupPassword" type="password" autocomplete="new-password" minlength="6" required></label>
+        <label class="field"><span>관리자 가입 코드</span><input id="signupCode" type="password" autocomplete="off" required></label>
+        <p class="help">가입 코드는 담당 교사에게 받으세요. 이메일 인증 없이 바로 사용할 수 있습니다.</p>
+        <p id="signupError" class="form-error hidden"></p>
+        <button id="signupSubmit" class="btn btn-primary btn-block" type="submit">계정 만들고 시작하기</button>
+      </form>
+
+      <a class="back-link" href="index.html">← 투표 페이지로</a>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 관리 화면 ═══════════════ -->
+  <section id="appView" class="app hidden">
+    <header class="app-header">
+      <strong class="app-brand">공모전 관리</strong>
+      <nav class="app-nav" role="tablist">
+        <button class="nav-btn is-active" type="button" data-panel="dashboard">대시보드</button>
+        <button class="nav-btn" type="button" data-panel="artworks">작품</button>
+        <button class="nav-btn" type="button" data-panel="students">학생</button>
+        <button class="nav-btn" type="button" data-panel="comments">댓글</button>
+        <button class="nav-btn" type="button" data-panel="results">결과</button>
+        <button class="nav-btn" type="button" data-panel="admins">교사 계정</button>
+      </nav>
+      <div class="app-user">
+        <span id="adminEmail" class="muted"></span>
+        <a class="btn btn-sm" href="index.html" target="_blank" rel="noopener">사이트 보기</a>
+        <button id="logoutBtn" class="btn btn-sm" type="button">로그아웃</button>
+      </div>
+    </header>
+
+    <main class="app-main">
+
+      <!-- ───────── 대시보드 ───────── -->
+      <section id="panel-dashboard" class="panel">
+        <div class="card voting-card">
+          <div>
+            <h2 class="card-title">투표 상태</h2>
+            <p id="votingStateText" class="muted">불러오는 중…</p>
+          </div>
+          <label class="switch">
+            <input id="votingToggle" type="checkbox">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="stats">
+          <div class="stat"><div class="stat-num" id="statArtworks">-</div><div class="stat-label">작품</div></div>
+          <div class="stat"><div class="stat-num" id="statStudents">-</div><div class="stat-label">로그인 학생</div></div>
+          <div class="stat"><div class="stat-num" id="statLikes">-</div><div class="stat-label">하트</div></div>
+          <div class="stat"><div class="stat-num" id="statComments">-</div><div class="stat-label">댓글</div></div>
+        </div>
+
+        <form id="settingsForm" class="card">
+          <h2 class="card-title">사이트 제목 · 안내문</h2>
+          <label class="field"><span>사이트 제목</span><input id="siteTitleInput" type="text" maxlength="60"></label>
+          <label class="field"><span>안내문 (갤러리 위에 표시, 줄바꿈 가능)</span><textarea id="siteNoticeInput" rows="3" maxlength="500"></textarea></label>
+          <div class="row-end"><button class="btn btn-primary" type="submit">저장</button></div>
+        </form>
+      </section>
+
+      <!-- ───────── 작품 ───────── -->
+      <section id="panel-artworks" class="panel hidden">
+        <div class="card">
+          <h2 class="card-title">1. 작품 정보 CSV 불러오기 <span class="muted small">(선택)</span></h2>
+          <p class="help">열 순서: <code>제목, 출품자, 설명, 파일명키워드</code>. 키워드가 이미지 파일명에 들어 있으면 자동으로 짝지어집니다.</p>
+          <div class="row">
+            <input id="csvInput" type="file" accept=".csv,text/csv">
+            <span id="csvStatus" class="muted small"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">2. 이미지 업로드</h2>
+          <div id="dropzone" class="dropzone" tabindex="0">
+            <p><strong>이미지를 여기에 끌어다 놓거나</strong> 클릭해서 선택하세요</p>
+            <p class="muted small">JPG · PNG · WEBP · GIF, 파일당 10MB 이하, 여러 장 가능</p>
+            <input id="fileInput" type="file" accept="image/*" multiple hidden>
+          </div>
+
+          <div id="pendingList" class="pending-list"></div>
+
+          <div id="uploadBar" class="row-end hidden">
+            <span id="uploadStatus" class="muted small"></span>
+            <button id="clearPendingBtn" class="btn" type="button">모두 비우기</button>
+            <button id="uploadBtn" class="btn btn-primary" type="button">모두 업로드</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="row-between">
+            <h2 class="card-title">등록된 작품 <span id="artworkCount" class="muted small"></span></h2>
+            <button id="reloadArtworksBtn" class="btn btn-sm" type="button">새로고침</button>
+          </div>
+          <p class="help">내용을 고친 뒤 <b>저장</b>을 누르세요. <b>숨김</b>은 학생 화면에서만 감춰지고 데이터는 유지됩니다. <b>삭제</b>는 이미지 파일과 하트·댓글까지 모두 지웁니다.</p>
+          <div id="artworkList" class="artwork-list"></div>
+        </div>
+      </section>
+
+      <!-- ───────── 학생 ───────── -->
+      <section id="panel-students" class="panel hidden">
+        <div class="card">
+          <div class="row-between wrap">
+            <h2 class="card-title">로그인한 학생 <span id="studentCount" class="muted small"></span></h2>
+            <div class="row">
+              <input id="studentSearch" type="search" placeholder="학교 · 학번 · 이름 검색">
+              <button id="studentCsvBtn" class="btn btn-sm" type="button">CSV</button>
+              <button id="reloadStudentsBtn" class="btn btn-sm" type="button">새로고침</button>
+            </div>
+          </div>
+          <p class="help"><b>기기 연결 해제</b>: 해당 학생은 다시 로그인해야 투표할 수 있습니다(하트·댓글은 유지).
+            <b>삭제</b>: 프로필과 그 학생의 하트·댓글을 모두 지웁니다.</p>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>학교</th><th>학번</th><th>이름</th><th>마지막 로그인</th><th>기기</th><th></th></tr></thead>
+              <tbody id="studentBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 댓글 ───────── -->
+      <section id="panel-comments" class="panel hidden">
+        <div class="card">
+          <div class="row-between wrap">
+            <h2 class="card-title">댓글 <span id="commentCount" class="muted small"></span></h2>
+            <div class="row">
+              <label class="check-inline"><input id="hiddenOnly" type="checkbox"> 숨긴 댓글만</label>
+              <button id="reloadCommentsBtn" class="btn btn-sm" type="button">새로고침</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>시간</th><th>작성자 (실명)</th><th>작품</th><th>내용</th><th>상태</th><th></th></tr></thead>
+              <tbody id="commentBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 결과 ───────── -->
+      <section id="panel-results" class="panel hidden">
+        <div class="card">
+          <div class="row-between wrap">
+            <h2 class="card-title">순위</h2>
+            <div class="row">
+              <button id="csvSummaryBtn" class="btn btn-sm" type="button">CSV: 작품별 집계</button>
+              <button id="csvLikesBtn" class="btn btn-sm" type="button">CSV: 하트 상세</button>
+              <button id="csvCommentsBtn" class="btn btn-sm" type="button">CSV: 댓글 상세</button>
+              <button id="reloadResultsBtn" class="btn btn-sm" type="button">새로고침</button>
+            </div>
+          </div>
+          <p class="help">CSV 는 엑셀에서 바로 열리도록 UTF-8 BOM 을 포함합니다. 숨긴 작품도 집계에 포함됩니다.</p>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>순위</th><th>작품</th><th>출품자</th><th>하트</th><th>댓글</th><th>상태</th></tr></thead>
+              <tbody id="resultBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────── 교사 계정 ───────── -->
+      <section id="panel-admins" class="panel hidden">
+        <div class="card">
+          <h2 class="card-title">교사 계정 목록</h2>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>이메일</th><th>등록일</th><th>등록 경로</th><th></th></tr></thead>
+              <tbody id="adminBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <form id="addAdminForm" class="card" novalidate>
+          <h2 class="card-title">교사 추가</h2>
+          <p class="help">새 교사의 이메일과 임시 비밀번호, 관리자 가입 코드를 입력하면 계정이 바로 만들어집니다.</p>
+          <div class="grid-3">
+            <label class="field"><span>이메일</span><input id="newAdminEmail" type="email" autocomplete="off" required></label>
+            <label class="field"><span>임시 비밀번호 (6자 이상)</span><input id="newAdminPassword" type="text" autocomplete="off" minlength="6" required></label>
+            <label class="field"><span>관리자 가입 코드</span><input id="newAdminCode" type="password" autocomplete="off" required></label>
+          </div>
+          <p id="addAdminError" class="form-error hidden"></p>
+          <div class="row-end"><button class="btn btn-primary" type="submit">교사 추가</button></div>
+        </form>
+      </section>
+
+    </main>
+  </section>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

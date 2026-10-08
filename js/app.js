@@ -3,10 +3,12 @@
    ---------------------------------------------------------------------
    흐름
      1. 페이지 로드 → 설정(투표 상태·제목·안내문), 작품 목록, 하트/댓글 수를 불러와 갤러리 표시
-     2. 로그인 버튼 → 익명 로그인(signInAnonymously) → claim_student 함수로 학생 프로필 연결
-     3. 하트 → toggle_like 함수 (화면은 먼저 바꾸고, 실패하면 되돌림 = 낙관적 업데이트)
-     4. 댓글 → add_comment / delete_my_comment 함수
+     2. 로그인 버튼 → claim_student 함수가 학생 프로필을 확인하고 "기기 토큰"을 발급
+        → 토큰을 localStorage 에 저장 (Supabase Auth 는 쓰지 않음)
+     3. 하트 → toggle_like(토큰, 작품) 함수 (화면은 먼저 바꾸고, 실패하면 되돌림 = 낙관적 업데이트)
+     4. 댓글 → add_comment / delete_my_comment 함수 (역시 토큰과 함께)
    학생이 테이블에 직접 쓰는 일은 없습니다. 쓰기는 전부 DB 함수(rpc)를 통해서만 합니다.
+   다른 기기에서 같은 학생이 로그인하면 새 토큰이 발급되어 이 기기의 토큰은 무효가 됩니다.
    ===================================================================== */
 (function () {
   'use strict';
@@ -20,6 +22,7 @@
   const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 
   // localStorage / sessionStorage 키
+  const LS_TOKEN   = 'vote_token';       // 기기 토큰 (claim_student 가 발급). 이 값이 곧 "로그인 상태"
   const LS_STUDENT = 'vote_student';     // 마지막으로 로그인한 학생 정보 (기기 연결 해제 감지 + 입력칸 자동 채움)
   const SS_ORDER   = 'vote_order';       // 랜덤 정렬 순서 (브라우저 탭을 닫기 전까지 고정)
   const SS_SORT    = 'vote_sort';        // 선택한 정렬 방식
@@ -31,6 +34,7 @@
     stats: new Map(),             // artwork_id → { like_count, comment_count }
     myLikes: new Set(),           // 내가 하트를 누른 artwork_id 들
     me: null,                     // { id, school, student_no, name } 또는 null
+    token: localStorage.getItem(LS_TOKEN) || null,   // 기기 토큰 (없으면 로그인 전)
     sort: sessionStorage.getItem(SS_SORT) || 'random',
     order: [],                    // 랜덤 정렬용 artwork_id 순서
     pending: new Set(),           // 서버 응답을 기다리는 중인 하트(중복 클릭 방지)
@@ -128,23 +132,25 @@
     state.stats = new Map((data || []).map((r) => [r.artwork_id, { like_count: Number(r.like_count), comment_count: Number(r.comment_count) }]));
   }
 
-  // 현재 기기(익명 세션)에 연결된 학생 프로필 확인
+  // 저장된 기기 토큰으로 내 프로필 복원. 토큰이 무효(다른 기기 로그인, 교사 해제)면 null
   async function loadMe() {
     state.me = null;
-    const { data: { session } } = await sb.auth.getSession();
-    if (!session || !session.user?.is_anonymous) return;
-
-    const { data, error } = await sb.from('students').select('id, school, student_no, name').limit(1);
+    if (!state.token) return;
+    const { data, error } = await sb.rpc('get_my_profile', { p_token: state.token });
     if (error) { console.warn('프로필 조회 실패', error); return; }
-    state.me = data && data[0] ? data[0] : null;
+    state.me = data || null;
+    if (!state.me) {                       // 토큰이 더 이상 유효하지 않음 → 버림
+      state.token = null;
+      localStorage.removeItem(LS_TOKEN);
+    }
   }
 
   async function loadMyLikes() {
     state.myLikes = new Set();
-    if (!state.me) return;
-    const { data, error } = await sb.from('likes').select('artwork_id');
+    if (!state.me || !state.token) return;
+    const { data, error } = await sb.rpc('get_my_likes', { p_token: state.token });
     if (error) { console.warn('내 하트 조회 실패', error); return; }
-    state.myLikes = new Set((data || []).map((r) => r.artwork_id));
+    state.myLikes = new Set(data || []);
   }
 
   // 랜덤 순서: 세션 동안 고정. 새로 추가된 작품은 뒤쪽에 섞어서 붙임
@@ -313,15 +319,6 @@
     el.loginError.classList.remove('hidden');
   }
 
-  async function ensureAnonSession() {
-    const { data: { session } } = await sb.auth.getSession();
-    if (session && session.user?.is_anonymous) return session;
-    if (session) await sb.auth.signOut();                         // 익명이 아닌 세션(교사 등)은 정리
-    const { data, error } = await sb.auth.signInAnonymously();
-    if (error) throw error;
-    return data.session;
-  }
-
   async function handleLogin(ev) {
     ev.preventDefault();
     const school = el.inSchool.value.trim();
@@ -335,28 +332,25 @@
     el.loginSubmit.disabled = true;
     el.loginSubmit.textContent = '확인 중…';
     try {
-      await ensureAnonSession();
+      // claim_student 가 프로필을 확인하고 새 기기 토큰을 돌려줌
       const { data, error } = await sb.rpc('claim_student', {
         p_school: school, p_student_no: studentNo, p_name: name, p_consent: consent,
       });
-      if (error) {
-        const { code, message } = errInfo(error);
-        if (code === 'NAME_MISMATCH') return showLoginError(message);
-        return showLoginError(message);
-      }
-      state.me = data;
-      localStorage.setItem(LS_STUDENT, JSON.stringify(data));
+      if (error) return showLoginError(errInfo(error).message);
+
+      const { token, ...profile } = data;
+      state.token = token;
+      state.me = profile;
+      localStorage.setItem(LS_TOKEN, token);
+      localStorage.setItem(LS_STUDENT, JSON.stringify(profile));
       el.deviceBanner.classList.add('hidden');
       await loadMyLikes();
       renderAll();
       el.loginDialog.close();
-      toast(`${data.name}님, 환영해요! 마음에 드는 작품에 하트를 눌러 주세요.`);
+      toast(`${profile.name}님, 환영해요! 마음에 드는 작품에 하트를 눌러 주세요.`);
     } catch (err) {
       console.error(err);
-      const msg = /rate limit/i.test(err?.message || '')
-        ? '지금 접속이 많아요. 잠시 후 다시 시도해 주세요.'
-        : '로그인 중 문제가 생겼어요. 네트워크를 확인하고 다시 시도해 주세요.';
-      showLoginError(msg);
+      showLoginError('로그인 중 문제가 생겼어요. 네트워크를 확인하고 다시 시도해 주세요.');
     } finally {
       el.loginSubmit.disabled = false;
       el.loginSubmit.textContent = '참여하기';
@@ -364,9 +358,15 @@
   }
 
   async function handleLogout() {
-    await sb.auth.signOut();
+    if (state.token) {
+      // 서버의 토큰도 무효화 (실패해도 로컬에서는 로그아웃 처리)
+      const { error } = await sb.rpc('logout_device', { p_token: state.token });
+      if (error) console.warn('logout_device 실패', error);
+    }
+    state.token = null;
     state.me = null;
     state.myLikes = new Set();
+    localStorage.removeItem(LS_TOKEN);
     localStorage.removeItem(LS_STUDENT);
     el.deviceBanner.classList.add('hidden');
     renderAll();
@@ -375,6 +375,8 @@
 
   // 서버가 "로그인이 필요함"이라고 답한 경우(다른 기기에서 로그인 등) 공통 처리
   function handleNotLoggedIn() {
+    state.token = null;
+    localStorage.removeItem(LS_TOKEN);     // 무효한 토큰은 버림 (학생 정보는 입력칸 자동 채움용으로 남김)
     state.me = null;
     state.myLikes = new Set();
     renderAll();
@@ -404,7 +406,7 @@
     refreshCard(id, !wasLiked);
 
     // 2) 서버에 반영
-    const { data, error } = await sb.rpc('toggle_like', { p_artwork_id: id });
+    const { data, error } = await sb.rpc('toggle_like', { p_token: state.token, p_artwork_id: id });
     state.pending.delete(id);
 
     if (error) {
@@ -528,7 +530,7 @@
     if (!state.me) return openLogin();
 
     el.commentSubmit.disabled = true;
-    const { data, error } = await sb.rpc('add_comment', { p_artwork_id: id, p_body: body });
+    const { data, error } = await sb.rpc('add_comment', { p_token: state.token, p_artwork_id: id, p_body: body });
     el.commentSubmit.disabled = false;
 
     if (error) {
@@ -548,7 +550,7 @@
 
   async function handleCommentDelete(commentId) {
     if (!confirm('이 댓글을 삭제할까요?')) return;
-    const { error } = await sb.rpc('delete_my_comment', { p_comment_id: commentId });
+    const { error } = await sb.rpc('delete_my_comment', { p_token: state.token, p_comment_id: commentId });
     if (error) {
       const { code, message } = errInfo(error);
       if (code === 'NOT_LOGGED_IN') return handleNotLoggedIn();

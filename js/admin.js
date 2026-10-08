@@ -482,7 +482,7 @@
   // ───────────────────────── 학생 ─────────────────────────
   async function loadStudents() {
     const { data, error } = await sb.from('students')
-      .select('id, school, student_no, name, auth_uid, last_login_at, created_at')
+      .select('id, school, student_no, name, device_hash, last_login_at, created_at')
       .order('last_login_at', { ascending: false });
     if (error) throw error;
     state.students = data || [];
@@ -504,9 +504,9 @@
         <td>${esc(s.student_no)}</td>
         <td>${esc(s.name)}</td>
         <td>${fmt(s.last_login_at)}</td>
-        <td>${s.auth_uid ? '<span class="badge ok">연결됨</span>' : '<span class="badge off">해제됨</span>'}</td>
+        <td>${s.device_hash ? '<span class="badge ok">연결됨</span>' : '<span class="badge off">해제됨</span>'}</td>
         <td class="actions">
-          <button class="btn btn-sm" type="button" data-act="unlink" ${s.auth_uid ? '' : 'disabled'}>기기 연결 해제</button>
+          <button class="btn btn-sm" type="button" data-act="unlink" ${s.device_hash ? '' : 'disabled'}>기기 연결 해제</button>
           <button class="btn btn-sm btn-danger" type="button" data-act="delete">삭제</button>
         </td>
       </tr>`).join('') : '<tr><td class="empty" colspan="6">학생이 없습니다.</td></tr>';
@@ -519,9 +519,10 @@
     const s = state.students.find((x) => x.id === id);
     if (!s) return;
     if (btn.dataset.act === 'unlink') {
-      const { error } = await sb.from('students').update({ auth_uid: null }).eq('id', id);
+      // 토큰 해시를 지우면 그 학생의 기기 토큰이 무효가 되어 다시 로그인해야 함
+      const { error } = await sb.from('students').update({ device_hash: null }).eq('id', id);
       if (error) return toast('실패: ' + friendly(error));
-      s.auth_uid = null;
+      s.device_hash = null;
       renderStudents();
       toast(`${s.name} 학생의 기기 연결을 해제했습니다.`);
     } else if (btn.dataset.act === 'delete') {
@@ -536,7 +537,7 @@
 
   function exportStudentsCsv() {
     const rows = [['학교', '학번', '이름', '마지막 로그인', '첫 로그인', '기기 연결']];
-    filteredStudents().forEach((s) => rows.push([s.school, s.student_no, s.name, fmt(s.last_login_at), fmt(s.created_at), s.auth_uid ? '연결됨' : '해제됨']));
+    filteredStudents().forEach((s) => rows.push([s.school, s.student_no, s.name, fmt(s.last_login_at), fmt(s.created_at), s.device_hash ? '연결됨' : '해제됨']));
     downloadCsv(`학생목록_${today()}.csv`, rows);
   }
 

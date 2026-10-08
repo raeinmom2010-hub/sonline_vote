@@ -1,18 +1,23 @@
 -- =====================================================================
---  학교 캐릭터 공모전 투표 사이트 - Supabase 스키마
+--  학교 캐릭터 공모전 투표 사이트 - Supabase 스키마 (v2: 기기 토큰 방식)
 -- =====================================================================
 --  사용 방법
 --    Supabase 대시보드 → SQL Editor → New query → 이 파일 전체를 붙여넣고 Run
 --
 --  특징
---    * 여러 번 실행해도 안전합니다. (if not exists / or replace / drop policy if exists)
+--    * 여러 번 실행해도 안전합니다. (if not exists / or replace / drop ... if exists)
+--    * 학생은 Supabase Auth(익명 로그인)를 쓰지 않습니다. 대신:
+--        - claim_student() 가 학생을 확인하고 "기기 토큰"(무작위 uuid)을 발급
+--        - 브라우저는 토큰을 localStorage 에 보관하고, 하트·댓글 함수를 부를 때 함께 보냄
+--        - DB 에는 토큰의 해시(md5)만 저장 → 교사가 표를 열어 봐도 학생 토큰을 알 수 없음
+--        - 다른 기기에서 다시 로그인하면 새 토큰이 발급되고 이전 토큰은 무효
 --    * 학생의 "쓰기"(로그인·하트·댓글)는 전부 SECURITY DEFINER 함수를 통해서만 가능하고,
 --      테이블에 직접 insert/update/delete 하는 정책은 학생에게 없습니다.
---    * 교사(관리자)는 is_admin() 이 true 일 때만 테이블을 직접 다룰 수 있습니다.
+--    * 교사(관리자)는 Supabase 이메일 로그인 + is_admin() 이 true 일 때만 테이블을 직접 다룹니다.
 --
 --  용어
---    anon           : 로그인하지 않은 방문자 (갤러리 열람만 가능)
---    authenticated  : 로그인한 사용자. 학생(익명 로그인)과 교사(이메일 로그인) 둘 다 여기에 속함
+--    anon           : 로그인하지 않은 방문자 역할. 학생 화면은 항상 이 역할로 동작함
+--    authenticated  : Supabase Auth 로 로그인한 사용자(교사)
 --    SECURITY DEFINER : 함수를 "만든 사람(postgres)" 권한으로 실행. RLS 를 우회해서
 --                       필요한 검사만 한 뒤 안전하게 데이터를 바꿀 때 사용
 -- =====================================================================
@@ -26,7 +31,6 @@
 --   "서울 고등학교", "서울고등학교", "서울고" → 모두 "서울고"
 --   "한빛중학교", "한빛중" → "한빛중"
 --   규칙: 소문자화 → 모든 공백 제거 → 끝에 붙은 "등학교" 또는 "학교" 제거
---   (같은 학교를 다르게 적어도 같은 학생으로 인식하기 위함)
 create or replace function public.normalize_school(p_school text)
 returns text
 language sql
@@ -61,13 +65,21 @@ begin
 end;
 $$;
 
+-- 기기 토큰 → 저장용 해시 (DB 에는 해시만 저장)
+create or replace function public.token_hash(p_token uuid)
+returns text
+language sql
+immutable
+as $$
+  select md5(coalesce(p_token::text, ''));
+$$;
+
 
 -- ---------------------------------------------------------------------
 -- 1. 테이블
 -- ---------------------------------------------------------------------
 
 -- 1-1. 관리자(교사) 목록
---   이메일이 이 표에 있고 + 익명 계정이 아니면 관리자입니다. (is_admin() 참고)
 create table if not exists public.admins (
   email       text primary key,
   created_at  timestamptz not null default now(),
@@ -86,7 +98,6 @@ insert into public.settings (id) values (1) on conflict (id) do nothing;
 
 -- 1-3. 비밀 값 저장소 (관리자 가입 코드 등)
 --   RLS 를 켜고 정책을 하나도 만들지 않아서 anon/authenticated 는 절대 읽을 수 없습니다.
---   SECURITY DEFINER 함수(register_admin) 안에서만 읽습니다.
 create table if not exists public.secrets (
   key    text primary key,
   value  text not null
@@ -97,19 +108,26 @@ on conflict (key) do nothing;
 
 -- 1-4. 학생 프로필
 --   * 같은 (정규화한 학교, 학번) 은 1명만 존재 → unique 인덱스로 보장
---   * auth_uid : 현재 이 학생과 연결된 익명 로그인 계정(= 기기). 다른 기기에서 다시 로그인하면
---                이 값이 새 계정으로 바뀌고, 이전 기기는 더 이상 투표할 수 없게 됩니다.
+--   * device_hash : 현재 이 학생과 연결된 기기 토큰의 해시. 다른 기기에서 다시 로그인하면
+--                   새 값으로 바뀌고, 이전 기기는 더 이상 투표할 수 없게 됩니다. null 이면 연결 해제 상태.
 create table if not exists public.students (
   id             uuid primary key default gen_random_uuid(),
   school         text not null,                                                   -- 입력한 그대로의 학교명
   school_key     text generated always as (public.normalize_school(school)) stored, -- 비교용 정규화 학교명
   student_no     text not null,
   name           text not null,
-  auth_uid       uuid unique,                                                     -- 연결된 기기(익명 계정). null 이면 연결 해제 상태
+  device_hash    text unique,
   consented_at   timestamptz,                                                     -- 개인정보 동의 시각
   created_at     timestamptz not null default now(),
   last_login_at  timestamptz not null default now()
 );
+-- (v1 에서 올라온 경우) 익명 로그인용 컬럼 제거, 토큰 컬럼 추가
+--   auth_uid 를 참조하던 v1 정책을 먼저 지워야 컬럼을 지울 수 있음
+drop policy if exists "students_select_own_or_admin" on public.students;
+drop policy if exists "likes_select_own_or_admin"    on public.likes;
+drop function if exists public.current_student_id();
+alter table public.students drop column if exists auth_uid;
+alter table public.students add column if not exists device_hash text unique;
 create unique index if not exists students_school_no_uidx on public.students (school_key, student_no);
 
 -- 1-5. 출품작
@@ -173,15 +191,17 @@ as $$
      );
 $$;
 
--- 현재 로그인한 기기(익명 계정)에 연결된 학생 id. 없으면 null
-create or replace function public.current_student_id()
+-- 기기 토큰으로 학생 id 찾기 (함수 내부용. 클라이언트에는 실행 권한을 주지 않음)
+create or replace function public.student_id_by_token(p_token uuid)
 returns uuid
 language sql
 stable
 security definer
 set search_path = public
 as $$
-  select s.id from public.students s where s.auth_uid = auth.uid() limit 1;
+  select s.id from public.students s
+   where p_token is not null and s.device_hash = public.token_hash(p_token)
+   limit 1;
 $$;
 
 
@@ -222,11 +242,11 @@ create policy "settings_update_admin" on public.settings
   for update to authenticated
   using (public.is_admin()) with check (public.is_admin());
 
--- students: 학생은 "자기 프로필"만, 관리자는 전체 조회 / 수정(기기 연결 해제) / 삭제
-drop policy if exists "students_select_own_or_admin" on public.students;
-create policy "students_select_own_or_admin" on public.students
+-- students: 관리자만 조회 / 수정(기기 연결 해제) / 삭제. 학생은 함수(get_my_profile)로 자기 정보만 받음.
+drop policy if exists "students_select_admin" on public.students;
+create policy "students_select_admin" on public.students
   for select to authenticated
-  using (auth_uid = auth.uid() or public.is_admin());
+  using (public.is_admin());
 
 drop policy if exists "students_update_admin" on public.students;
 create policy "students_update_admin" on public.students
@@ -259,12 +279,11 @@ create policy "artworks_delete_admin" on public.artworks
   for delete to authenticated
   using (public.is_admin());
 
--- likes: 학생은 "내가 누른 하트"만 조회(어떤 카드에 빨간 하트를 칠할지 알기 위해), 관리자는 전체 조회.
---        쓰기 정책은 없음 → toggle_like() 함수로만 가능. 전체 개수는 get_artwork_stats() 로만 제공.
-drop policy if exists "likes_select_own_or_admin" on public.likes;
-create policy "likes_select_own_or_admin" on public.likes
+-- likes: 관리자만 직접 조회/삭제. 학생은 toggle_like()/get_my_likes() 함수로만. 전체 개수는 get_artwork_stats().
+drop policy if exists "likes_select_admin" on public.likes;
+create policy "likes_select_admin" on public.likes
   for select to authenticated
-  using (student_id = public.current_student_id() or public.is_admin());
+  using (public.is_admin());
 
 drop policy if exists "likes_delete_admin" on public.likes;
 create policy "likes_delete_admin" on public.likes
@@ -290,16 +309,21 @@ create policy "comments_delete_admin" on public.comments
 
 
 -- ---------------------------------------------------------------------
--- 4. 학생용 함수 (모두 SECURITY DEFINER)
+-- 4. 학생용 함수 (모두 SECURITY DEFINER, 첫 인자는 기기 토큰)
 --    클라이언트(js/app.js)는 supabase.rpc('함수명', {인자}) 로 호출합니다.
 --    오류 메시지는 한국어로 raise 하고, 프로그램이 구분해야 하는 경우 hint 에 코드를 넣습니다.
 -- ---------------------------------------------------------------------
 
--- 4-1. 학생 로그인(프로필 연결)
---   흐름: 클라이언트가 먼저 supabase.auth.signInAnonymously() → 그 다음 이 함수를 호출
+-- v1 함수(익명 로그인 기반) 시그니처 제거
+drop function if exists public.claim_student(text, text, text, boolean);
+drop function if exists public.toggle_like(uuid);
+drop function if exists public.add_comment(uuid, text);
+drop function if exists public.delete_my_comment(uuid);
+
+-- 4-1. 학생 로그인(프로필 연결) → 기기 토큰 발급
 --   * (학교, 학번) 이 처음이면 프로필 생성
---   * 이미 있으면 이름이 같을 때만 "현재 기기"로 연결을 옮김 (학번 도용 방지)
---   * 이 기기가 전에 다른 학생과 연결돼 있었다면 그 연결은 끊음
+--   * 이미 있으면 이름이 같을 때만 "이 기기"로 연결을 옮김 (학번 도용 방지)
+--   * 반환: {id, school, student_no, name, token}  ← token 은 이 응답에서만 볼 수 있음
 create or replace function public.claim_student(
   p_school      text,
   p_student_no  text,
@@ -312,19 +336,13 @@ security definer
 set search_path = public
 as $$
 declare
-  v_uid     uuid := auth.uid();
   v_school  text := regexp_replace(trim(coalesce(p_school, '')), '\s+', ' ', 'g');   -- 연속 공백은 1개로
   v_no      text := regexp_replace(coalesce(p_student_no, ''), '\s+', '', 'g');     -- 학번은 공백 전부 제거
   v_name    text := regexp_replace(coalesce(p_name, ''), '\s+', '', 'g');           -- 이름도 공백 제거
   v_key     text := public.normalize_school(v_school);
+  v_token   uuid := gen_random_uuid();                                              -- 새 기기 토큰
   s         public.students%rowtype;
 begin
-  if v_uid is null then
-    raise exception '로그인 세션이 없습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.' using hint = 'NO_SESSION';
-  end if;
-  if coalesce(auth.jwt() ->> 'is_anonymous', 'false') <> 'true' then
-    raise exception '학생 로그인은 익명 세션에서만 가능합니다.' using hint = 'NOT_ANON';
-  end if;
   if not coalesce(p_consent, false) then
     raise exception '개인정보 수집·이용에 동의해야 참여할 수 있습니다.' using hint = 'NO_CONSENT';
   end if;
@@ -335,12 +353,6 @@ begin
     raise exception '입력이 너무 깁니다. (학교 30자, 학번·이름 20자 이내)' using hint = 'TOO_LONG';
   end if;
 
-  -- 이 기기가 다른 학생과 연결돼 있었다면 먼저 끊는다 (auth_uid 는 unique 이므로 필수)
-  update public.students
-     set auth_uid = null
-   where auth_uid = v_uid
-     and not (school_key = v_key and student_no = v_no);
-
   select * into s
     from public.students
    where school_key = v_key and student_no = v_no
@@ -349,8 +361,8 @@ begin
   if not found then
     -- 처음 참여하는 학생 → 프로필 생성
     begin
-      insert into public.students (school, student_no, name, auth_uid, consented_at, last_login_at)
-      values (v_school, v_no, v_name, v_uid, now(), now())
+      insert into public.students (school, student_no, name, device_hash, consented_at, last_login_at)
+      values (v_school, v_no, v_name, public.token_hash(v_token), now(), now())
       returning * into s;
     exception when unique_violation then
       -- 두 기기에서 동시에 처음 로그인한 아주 드문 경우
@@ -363,7 +375,7 @@ begin
         using hint = 'NAME_MISMATCH';
     end if;
     update public.students
-       set auth_uid      = v_uid,              -- 새 기기로 연결 이동 (이전 기기는 투표 불가)
+       set device_hash   = public.token_hash(v_token),   -- 새 기기로 연결 이동 (이전 기기는 투표 불가)
            last_login_at = now(),
            consented_at  = coalesce(consented_at, now())
      where id = s.id
@@ -374,34 +386,58 @@ begin
     'id',         s.id,
     'school',     s.school,
     'student_no', s.student_no,
-    'name',       s.name
+    'name',       s.name,
+    'token',      v_token
   );
 end;
 $$;
 
--- 4-2. 하트 토글 (누르면 추가, 다시 누르면 취소)
+-- 4-2. 토큰으로 내 프로필 확인 (페이지를 다시 열었을 때 로그인 상태 복원용)
+--   연결이 끊겼으면(다른 기기 로그인, 교사가 해제) null 을 돌려줌
+create or replace function public.get_my_profile(p_token uuid)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select jsonb_build_object('id', s.id, 'school', s.school, 'student_no', s.student_no, 'name', s.name)
+    from public.students s
+   where s.id = public.student_id_by_token(p_token);
+$$;
+
+-- 4-3. 내가 하트를 누른 작품 id 목록
+create or replace function public.get_my_likes(p_token uuid)
+returns setof uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select l.artwork_id from public.likes l
+   where l.student_id = public.student_id_by_token(p_token);
+$$;
+
+-- 4-4. 하트 토글 (누르면 추가, 다시 누르면 취소)
 --   반환: {"liked": true/false, "count": 현재 하트 수}
-create or replace function public.toggle_like(p_artwork_id uuid)
+create or replace function public.toggle_like(p_token uuid, p_artwork_id uuid)
 returns jsonb
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_sid    uuid;
+  v_sid    uuid := public.student_id_by_token(p_token);
   v_liked  boolean;
   v_count  bigint;
 begin
   if not (select voting_open from public.settings where id = 1) then
     raise exception '지금은 투표 기간이 아닙니다.' using hint = 'VOTING_CLOSED';
   end if;
-
-  select id into v_sid from public.students where auth_uid = auth.uid();
   if v_sid is null then
     -- 로그인 전이거나, 다른 기기에서 로그인해서 이 기기의 연결이 끊긴 경우
     raise exception '로그인이 필요합니다. 다른 기기에서 로그인했다면 이 기기에서 다시 로그인해 주세요.' using hint = 'NOT_LOGGED_IN';
   end if;
-
   if not exists (select 1 from public.artworks where id = p_artwork_id and hidden = false) then
     raise exception '작품을 찾을 수 없습니다.' using hint = 'NO_ARTWORK';
   end if;
@@ -419,16 +455,15 @@ begin
 end;
 $$;
 
--- 4-3. 댓글 작성 (200자 제한, 작성자명은 저장 시점에 마스킹)
---   반환: 저장된 댓글 1건 (id, artwork_id, student_id, body, masked_name, created_at)
-create or replace function public.add_comment(p_artwork_id uuid, p_body text)
+-- 4-5. 댓글 작성 (200자 제한, 작성자명은 저장 시점에 마스킹)
+create or replace function public.add_comment(p_token uuid, p_artwork_id uuid, p_body text)
 returns jsonb
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_sid   uuid;
+  v_sid   uuid := public.student_id_by_token(p_token);
   v_name  text;
   v_body  text := trim(coalesce(p_body, ''));
   c       public.comments%rowtype;
@@ -436,22 +471,20 @@ begin
   if not (select voting_open from public.settings where id = 1) then
     raise exception '지금은 투표 기간이 아닙니다.' using hint = 'VOTING_CLOSED';
   end if;
-
-  select id, name into v_sid, v_name from public.students where auth_uid = auth.uid();
   if v_sid is null then
     raise exception '로그인이 필요합니다. 다른 기기에서 로그인했다면 이 기기에서 다시 로그인해 주세요.' using hint = 'NOT_LOGGED_IN';
   end if;
-
   if char_length(v_body) = 0 then
     raise exception '댓글 내용을 입력해 주세요.' using hint = 'EMPTY';
   end if;
   if char_length(v_body) > 200 then
     raise exception '댓글은 200자까지 쓸 수 있습니다.' using hint = 'TOO_LONG';
   end if;
-
   if not exists (select 1 from public.artworks where id = p_artwork_id and hidden = false) then
     raise exception '작품을 찾을 수 없습니다.' using hint = 'NO_ARTWORK';
   end if;
+
+  select name into v_name from public.students where id = v_sid;
 
   insert into public.comments (artwork_id, student_id, body, masked_name)
   values (p_artwork_id, v_sid, v_body, public.mask_name(v_name))
@@ -468,21 +501,19 @@ begin
 end;
 $$;
 
--- 4-4. 내 댓글 삭제 (본인 것만)
-create or replace function public.delete_my_comment(p_comment_id uuid)
+-- 4-6. 내 댓글 삭제 (본인 것만)
+create or replace function public.delete_my_comment(p_token uuid, p_comment_id uuid)
 returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_sid uuid;
+  v_sid uuid := public.student_id_by_token(p_token);
 begin
-  select id into v_sid from public.students where auth_uid = auth.uid();
   if v_sid is null then
     raise exception '로그인이 필요합니다.' using hint = 'NOT_LOGGED_IN';
   end if;
-
   delete from public.comments where id = p_comment_id and student_id = v_sid;
   if not found then
     raise exception '삭제할 수 있는 댓글이 아닙니다.' using hint = 'NOT_OWNER';
@@ -490,8 +521,19 @@ begin
 end;
 $$;
 
--- 4-5. 작품별 하트 수 / (숨기지 않은) 댓글 수
---   likes 표는 학생이 전체를 읽을 수 없으므로, 집계만 이 함수로 공개합니다. 로그인 전에도 호출 가능.
+-- 4-7. 로그아웃: 이 기기의 토큰을 무효화
+create or replace function public.logout_device(p_token uuid)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update public.students set device_hash = null
+   where p_token is not null and device_hash = public.token_hash(p_token);
+$$;
+
+-- 4-8. 작품별 하트 수 / (숨기지 않은) 댓글 수
+--   likes 표는 학생이 읽을 수 없으므로, 집계만 이 함수로 공개합니다.
 create or replace function public.get_artwork_stats()
 returns table (artwork_id uuid, like_count bigint, comment_count bigint)
 language sql
@@ -511,16 +553,30 @@ $$;
 -- 5. 관리자 등록 함수
 -- ---------------------------------------------------------------------
 
+-- 가입 코드가 맞는지만 확인 (계정을 만들기 "전"에 검사해서 쓸모없는 계정이 생기지 않게 함)
+create or replace function public.verify_admin_code(p_code text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.secrets
+    where key = 'admin_signup_code' and value = coalesce(p_code, '')
+  );
+$$;
+
 -- 가입 코드로 관리자 등록
 --   admin.html 의 흐름:
---     1) supabase.auth.signUp({ email, password })  → auth.users 에 계정 생성
---     2) supabase.rpc('register_admin', { p_email, p_code })  → 이 함수
---        - secrets 표의 가입 코드와 비교
+--     1) verify_admin_code 로 코드 확인
+--     2) supabase.auth.signUp({ email, password })  → auth.users 에 계정 생성
+--     3) supabase.rpc('register_admin', { p_email, p_code })  → 이 함수
+--        - 가입 코드 재확인
 --        - 이메일 인증을 기다리지 않도록 email_confirmed_at 을 채워 즉시 활성화
 --        - admins 표에 이메일 추가
---     3) supabase.auth.signInWithPassword(...)
+--     4) supabase.auth.signInWithPassword(...)
 --   "Confirm email" 설정이 켜져 있어도 꺼져 있어도 동작합니다.
---   로그인 후 대시보드의 "교사 추가"도 같은 함수를 씁니다.
 create or replace function public.register_admin(p_email text, p_code text)
 returns void
 language plpgsql
@@ -561,43 +617,29 @@ end;
 $$;
 
 
--- 가입 코드가 맞는지만 확인 (계정을 만들기 "전"에 검사해서 쓸모없는 계정이 생기지 않게 함)
-create or replace function public.verify_admin_code(p_code text)
-returns boolean
-language sql
-stable
-security definer
-set search_path = public
-as $$
-  select exists (
-    select 1 from public.secrets
-    where key = 'admin_signup_code' and value = coalesce(p_code, '')
-  );
-$$;
-
-
 -- ---------------------------------------------------------------------
 -- 6. 함수 실행 권한
---    기본적으로 새 함수는 모든 역할이 실행할 수 있으므로, 한 번 회수한 뒤 필요한 역할에만 다시 부여합니다.
+--    기본적으로 새 함수는 모든 역할이 실행할 수 있으므로, 내부용 함수는 회수하고
+--    학생용 함수는 anon(학생 화면) 과 authenticated 둘 다에 허용합니다.
 -- ---------------------------------------------------------------------
-revoke execute on function public.claim_student(text, text, text, boolean) from public, anon;
-grant  execute on function public.claim_student(text, text, text, boolean) to authenticated;
+-- 내부용: 클라이언트가 직접 부를 수 없게 함
+revoke execute on function public.student_id_by_token(uuid) from public, anon, authenticated;
+revoke execute on function public.token_hash(uuid)          from public, anon, authenticated;
 
-revoke execute on function public.toggle_like(uuid)        from public, anon;
-grant  execute on function public.toggle_like(uuid)        to authenticated;
+-- 학생용
+grant execute on function public.claim_student(text, text, text, boolean) to anon, authenticated;
+grant execute on function public.get_my_profile(uuid)                     to anon, authenticated;
+grant execute on function public.get_my_likes(uuid)                       to anon, authenticated;
+grant execute on function public.toggle_like(uuid, uuid)                  to anon, authenticated;
+grant execute on function public.add_comment(uuid, uuid, text)            to anon, authenticated;
+grant execute on function public.delete_my_comment(uuid, uuid)            to anon, authenticated;
+grant execute on function public.logout_device(uuid)                      to anon, authenticated;
+grant execute on function public.get_artwork_stats()                      to anon, authenticated;
 
-revoke execute on function public.add_comment(uuid, text)  from public, anon;
-grant  execute on function public.add_comment(uuid, text)  to authenticated;
-
-revoke execute on function public.delete_my_comment(uuid)  from public, anon;
-grant  execute on function public.delete_my_comment(uuid)  to authenticated;
-
--- 아래 함수들은 로그인 전(anon)에도 필요
-grant execute on function public.get_artwork_stats()        to anon, authenticated;
+-- 관리자 관련
 grant execute on function public.register_admin(text, text) to anon, authenticated;
 grant execute on function public.verify_admin_code(text)    to anon, authenticated;
 grant execute on function public.is_admin()                 to anon, authenticated;
-grant execute on function public.current_student_id()       to anon, authenticated;
 grant execute on function public.normalize_school(text)     to anon, authenticated;
 grant execute on function public.mask_name(text)            to anon, authenticated;
 
@@ -641,6 +683,6 @@ create policy "artworks_bucket_admin_delete" on storage.objects
 -- ---------------------------------------------------------------------
 -- 8. 확인용 (실행 결과창에 표시됨)
 -- ---------------------------------------------------------------------
-select 'schema ok' as status,
+select 'schema ok (v2 token)' as status,
        (select count(*) from public.admins)   as admin_count,
        (select voting_open from public.settings where id = 1) as voting_open;

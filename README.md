@@ -52,20 +52,22 @@
 | 표 | `students` | 학생 프로필. (학교, 학번) 중복 불가 |
 | 표 | `artworks` | 출품작 |
 | 표 | `likes`, `comments` | 하트, 댓글 |
-| 함수 | `claim_student`, `toggle_like`, `add_comment`, `delete_my_comment` | 학생이 쓰기를 할 수 있는 유일한 통로 |
+| 함수 | `claim_student`, `get_my_profile`, `get_my_likes`, `toggle_like`, `add_comment`, `delete_my_comment`, `logout_device` | 학생이 데이터를 다룰 수 있는 유일한 통로 (기기 토큰으로 본인 확인) |
 | 함수 | `get_artwork_stats` | 작품별 하트·댓글 수 |
 | 함수 | `is_admin`, `verify_admin_code`, `register_admin` | 관리자 판정·등록 |
 | Storage | `artworks` 버킷 | 작품 이미지 (공개 읽기, 관리자만 업로드) |
 
 ### 1-3. 인증(Authentication) 설정
-왼쪽 메뉴 **Authentication** 에서:
+학생 로그인은 Supabase Auth 를 쓰지 않으므로(아래 "학생 로그인 방식" 참고) **익명 로그인 설정이나 Rate Limit 조정이 필요 없습니다.**
+교사 로그인만 Supabase Auth 를 사용합니다. 왼쪽 메뉴 **Authentication** 에서:
 
-1. **Sign In / Providers → Anonymous sign-ins** 를 **켭니다**. (학생 로그인에 필요. 가장 중요!)
-2. **Sign In / Providers → Email** 이 켜져 있는지 확인합니다. (교사 로그인)
-3. **Rate Limits** 에서 **Anonymous users** 제한을 학생 수보다 크게 올립니다.
-   기본값은 IP 당 시간당 30회인데, 학교 와이파이는 모든 학생이 같은 IP 로 보이므로 그대로 두면 31번째 학생부터 로그인에 실패합니다. 예: 500 이상.
-4. (권장) **Sign In / Providers → Email → Confirm email** 을 **끕니다**.
+1. **Sign In / Providers → Email** 이 켜져 있는지 확인합니다. (기본값: 켜짐)
+2. (권장) **Sign In / Providers → Email → Confirm email** 을 **끕니다**.
    꺼 두면 교사 계정을 만들 때 가장 매끄럽습니다. 켜져 있어도 가입 코드로 등록할 때 자동으로 활성화되도록 만들어 두었습니다.
+
+> **학생 로그인 방식**: 학생이 학교·학번·이름을 입력하면 DB 함수 `claim_student` 가 프로필을 확인하고
+> 무작위 **기기 토큰**을 발급합니다. 브라우저는 토큰을 저장해 두고 하트·댓글을 보낼 때 함께 보냅니다.
+> DB 에는 토큰의 해시만 저장되며, 같은 학생이 다른 기기에서 로그인하면 새 토큰이 발급되어 이전 기기는 투표할 수 없게 됩니다.
 
 ### 1-4. 교사(관리자) 계정 만들기 — 둘 중 하나
 **방법 A. 관리 페이지에서 만들기 (권장)**
@@ -173,8 +175,8 @@ CSV 는 UTF-8 BOM 이 들어 있어 엑셀에서 바로 열립니다.
 | 증상 | 원인 · 해결 |
 |---|---|
 | 학생 화면에 "작품을 불러오지 못했어요" | `schema.sql` 을 아직 실행하지 않았거나 `config.js` 의 URL/key 가 틀림. 브라우저 F12 → Console 의 오류 메시지 확인 |
-| 로그인 시 "로그인 중 문제가 생겼어요" | **Anonymous sign-ins** 가 꺼져 있음 (1-3 참고) |
-| 수업 중 일부 학생만 로그인 실패 | 익명 로그인 **Rate Limit** 초과. Authentication → Rate Limits 에서 올리기 |
+| 로그인 시 "로그인 중 문제가 생겼어요" | 네트워크 문제이거나 `schema.sql` 이 최신(v2, 기기 토큰 방식)이 아님. SQL Editor 에서 `schema.sql` 을 다시 실행 |
+| 로그인 시 "Could not find the function public.claim_student" | 예전 버전 스키마가 들어 있음. `schema.sql` 전체를 다시 실행하면 v1 함수가 정리되고 v2 로 바뀜 |
 | "같은 학교·학번으로 이미 다른 이름이 등록" | 학번 오타이거나 다른 학생이 그 학번을 먼저 씀. 교사가 **학생** 탭에서 확인 후 잘못된 프로필 삭제 |
 | 학생이 "다른 기기에서 로그인되었다" 안내를 봄 | 정상 동작(마지막 로그인 기기만 투표 가능). 그 기기에서 다시 로그인하면 됨 |
 | 교사 로그인 시 "Email not confirmed" | Confirm email 이 켜진 상태에서 코드 없이 가입한 경우. **관리자 계정 만들기** 탭에서 같은 이메일·비밀번호 + 가입 코드로 다시 등록하면 활성화됨 |
@@ -201,7 +203,10 @@ delete from public.artworks;
 
 - 코드에는 **anon key 만** 들어 있고, 모든 표에 RLS 가 켜져 있습니다.
 - 학생은 테이블에 직접 쓸 수 없습니다. 로그인·하트·댓글은 `SECURITY DEFINER` 함수를 통해서만 가능하고,
-  함수 안에서 **투표 기간, 본인 여부, 글자 수, 이름 일치**를 다시 검사합니다.
+  함수 안에서 **투표 기간, 본인 여부(기기 토큰), 글자 수, 이름 일치**를 다시 검사합니다.
+- 학생 본인 확인은 Supabase Auth 대신 **기기 토큰**(무작위 UUID)으로 합니다. DB 에는 토큰의 해시만 저장되어
+  교사가 표를 열어 봐도 학생을 사칭할 수 없고, 다른 기기에서 로그인하면 이전 토큰은 즉시 무효가 됩니다.
+  (Supabase 익명 로그인의 IP 당 횟수 제한도 받지 않습니다.)
 - 같은 (정규화한 학교명, 학번) 은 DB unique 인덱스로 1명만 허용됩니다. 학교명은 띄어쓰기와 "등학교/학교" 꼬리를 무시하고 비교합니다.
 - 학생은 **자기 프로필과 자기 하트**만 조회할 수 있고, 다른 학생의 이름·학번은 어떤 경로로도 받을 수 없습니다.
   댓글 작성자명은 저장 시점에 마스킹(예: 강*욱)되어 실명 컬럼은 관리자만 봅니다.
